@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rudy-cat-crop"
+version = "0.1.0"
+description = "Batch cat photo cropping using YOLOv8 detections."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ultralytics>=8.2.0",
+    "Pillow>=10.0.0",
+]
+
+[project.scripts]
+crop-cat = "crop_cat:main"
+
+[tool.setuptools]
+py-modules = ["crop_cat"]
