@@ -38,13 +38,13 @@ Ou via le script Windows:
 ## Comportement par defaut
 
 - Lit les images dans `Pictures`
-- Ecrit les images recadrees dans `Pictures/CROPPED`
+- Ecrit les images recadrees dans `Pictures/Cropped`
 - Charge le modele dans `Models/` (par defaut: `Models/yolov8n.pt`)
 - Garde le plus gros chat detecte par image
 - Deplace les photos sources:
-  - `Pictures/OK` si un chat est detecte
-  - `Pictures/SKIP` sinon
-- Ne vide pas `Pictures/CROPPED` automatiquement
+  - `Pictures/Ok` si un chat est detecte
+  - `Pictures/Skip` sinon
+- Ne vide pas `Pictures/Cropped` automatiquement
 
 ## Options utiles
 
@@ -52,13 +52,15 @@ Ou via le script Windows:
 python crop_cat.py --padding 0.20
 python crop_cat.py --conf 0.40
 python crop_cat.py --model Models/yolo12n.pt
-python crop_cat.py --retry-all
-python crop_cat.py --retry-skip
-python crop_cat.py --input "D:\MesPhotos\Chats" --output "D:\MesPhotos\Chats\CROPPED"
+python crop_cat.py --retry all
+python crop_cat.py --retry skip
+python crop_cat.py --retry ok
+python crop_cat.py --input "D:\MesPhotos\Chats" --output "D:\MesPhotos\Chats\Cropped"
 ```
 
-`--retry-all` vide `CROPPED`, remet les images de `OK` et `SKIP` dans `Pictures`, puis relance tout.
-`--retry-skip` remet seulement les images de `SKIP` dans `Pictures`, puis relance.
+`--retry all` vide `Cropped`, remet les images de `Ok` et `Skip` dans `Pictures`, puis relance tout.
+`--retry skip` remet seulement les images de `Skip` dans `Pictures`, puis relance.
+`--retry ok` remet seulement les images de `Ok` dans `Pictures`, puis relance.
 
 ## Logs
 

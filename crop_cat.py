@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import time
 import shutil
 import sys
 from pathlib import Path
@@ -14,6 +13,11 @@ from ultralytics import YOLO
 
 CAT_CLASS_ID = 15  # COCO class id for "cat"
 MODELS_DIR = Path("Models")
+PICTURES_DIR_NAME = "Pictures"
+CROPPED_DIR_NAME = "Cropped"
+OK_DIR_NAME = "Ok"
+SKIP_DIR_NAME = "Skip"
+RETRY_CHOICES = ("all", "skip", "ok")
 IMAGE_EXTENSIONS = {
     ".jpg",
     ".jpeg",
@@ -33,14 +37,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("Pictures"),
-        help="Input folder containing images (default: Pictures).",
+        default=Path(PICTURES_DIR_NAME),
+        help=f"Input folder containing images (default: {PICTURES_DIR_NAME}).",
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=None,
-        help="Output folder (default: <input>/CROPPED).",
+        help=f"Output folder (default: <input>/{CROPPED_DIR_NAME}).",
     )
     parser.add_argument(
         "--model",
@@ -60,14 +64,15 @@ def parse_args() -> argparse.Namespace:
         help="Padding ratio around the detected cat (default: 0.10).",
     )
     parser.add_argument(
-        "--retry-all",
-        action="store_true",
-        help="Restore images from OK/SKIP, clear output, then reprocess all photos.",
-    )
-    parser.add_argument(
-        "--retry-skip",
-        action="store_true",
-        help="Restore images from SKIP into input folder before processing.",
+        "--retry",
+        choices=RETRY_CHOICES,
+        default=None,
+        help=(
+            "Restore images before processing: "
+            f"'all' restores {OK_DIR_NAME}/{SKIP_DIR_NAME} and clears output, "
+            f"'skip' restores only {SKIP_DIR_NAME}, "
+            f"'ok' restores only {OK_DIR_NAME}."
+        ),
     )
     return parser.parse_args()
 
@@ -101,7 +106,7 @@ def save_crop(image: Image.Image, box, out_path: Path) -> None:
     crop.save(out_path, **kwargs)
 
 
-def load_image(path: Path) -> Image.Image:
+def pillow_load_image(path: Path) -> Image.Image:
     with Image.open(path) as im_raw:
         return ImageOps.exif_transpose(im_raw).copy()
 
@@ -112,7 +117,7 @@ def predict_with_fallback(model: YOLO, img_path: Path, conf: float):
     except FileNotFoundError:
         # Ultralytics does not accept some extensions by path (e.g. .jfif).
         # Fallback: load image with Pillow and pass the image directly.
-        image = load_image(img_path)
+        image = pillow_load_image(img_path)
         return model(image, conf=conf, verbose=False)[0], image
 
 
@@ -156,6 +161,32 @@ def restore_images_from_subfolders(input_dir: Path, folder_names: tuple[str, ...
     return restored
 
 
+def handle_retry_all(input_dir: Path, output_dir: Path) -> bool:
+    try:
+        clear_directory_contents(output_dir)
+    except OSError as exc:
+        print(f"[error] Could not clear output folder {output_dir}: {exc}")
+        return False
+
+    restored = restore_images_from_subfolders(input_dir, (OK_DIR_NAME, SKIP_DIR_NAME))
+    print(f"[info] Cleared output folder: {output_dir}")
+    print(
+        f"[info] Restored {restored} images from "
+        f"{OK_DIR_NAME}/{SKIP_DIR_NAME} into {input_dir}"
+    )
+    return True
+
+
+def handle_retry_skip(input_dir: Path) -> None:
+    restored = restore_images_from_subfolders(input_dir, (SKIP_DIR_NAME,))
+    print(f"[info] Restored {restored} images from {SKIP_DIR_NAME} into {input_dir}")
+
+
+def handle_retry_ok(input_dir: Path) -> None:
+    restored = restore_images_from_subfolders(input_dir, (OK_DIR_NAME,))
+    print(f"[info] Restored {restored} images from {OK_DIR_NAME} into {input_dir}")
+
+
 def resolve_model_arg(model_arg: str) -> str:
     # If only a .pt filename is provided, keep model files under Models/.
     candidate = Path(model_arg)
@@ -172,7 +203,7 @@ def resolve_model_arg(model_arg: str) -> str:
 def main() -> int:
     args = parse_args()
     input_dir = args.input.resolve()
-    output_dir = (args.output or (args.input / "CROPPED")).resolve()
+    output_dir = (args.output or (args.input / CROPPED_DIR_NAME)).resolve()
     model_arg = resolve_model_arg(args.model)
 
     if not input_dir.exists() or not input_dir.is_dir():
@@ -185,34 +216,21 @@ def main() -> int:
 
     print(f"[info] Loading model: {model_arg}")
     model = None
-    for attempt in range(1, 4):
-        try:
-            model = YOLO(model_arg)
-            break
-        except Exception as exc:
-            if attempt < 3:
-                print(f"[warn] Model load failed (attempt {attempt}/3): {exc}")
-                time.sleep(1)
-            else:
-                print(f"[error] Could not load model '{model_arg}': {exc}")
-                print("[hint] Retry, or pass a local model path with --model.")
-                print("[hint] Example: python crop_cat.py --model Models/yolo11n.pt")
-                return 1
+    try:
+        model = YOLO(model_arg)
+    except Exception as exc:
+        print(f"[error] Could not load model '{model_arg}': {exc}")
+        return 1
 
     assert model is not None
 
-    if args.retry_all:
-        try:
-            clear_directory_contents(output_dir)
-        except OSError as exc:
-            print(f"[error] Could not clear output folder {output_dir}: {exc}")
+    if args.retry == "all":
+        if not handle_retry_all(input_dir, output_dir):
             return 1
-        restored = restore_images_from_subfolders(input_dir, ("OK", "SKIP"))
-        print(f"[info] Cleared output folder: {output_dir}")
-        print(f"[info] Restored {restored} images from OK/SKIP into {input_dir}")
-    elif args.retry_skip:
-        restored = restore_images_from_subfolders(input_dir, ("SKIP",))
-        print(f"[info] Restored {restored} images from SKIP into {input_dir}")
+    elif args.retry == "skip":
+        handle_retry_skip(input_dir)
+    elif args.retry == "ok":
+        handle_retry_ok(input_dir)
 
     images = list(list_images(input_dir))
     if not images:
@@ -225,8 +243,8 @@ def main() -> int:
     skipped = 0
     moved_ok = 0
     moved_skip = 0
-    ok_dir = input_dir / "OK"
-    skip_dir = input_dir / "SKIP"
+    ok_dir = input_dir / OK_DIR_NAME
+    skip_dir = input_dir / SKIP_DIR_NAME
 
     for img_path in images:
         try:
@@ -262,7 +280,7 @@ def main() -> int:
             print(f"[skip] {img_path.name}: no cat detected")
             continue
 
-        im = loaded_image if loaded_image is not None else load_image(img_path)
+        im = loaded_image if loaded_image is not None else pillow_load_image(img_path)
         width, height = im.size
 
         _, x1, y1, x2, y2 = max(cat_boxes, key=lambda b: b[0])
@@ -277,7 +295,8 @@ def main() -> int:
 
     print(
         f"\n[done] Saved: {saved} | Skipped: {skipped} | "
-        f"Moved OK: {moved_ok} | Moved skip: {moved_skip} | Output: {output_dir}"
+        f"Moved {OK_DIR_NAME}: {moved_ok} | "
+        f"Moved {SKIP_DIR_NAME}: {moved_skip} | Output: {output_dir}"
     )
     return 0
 
