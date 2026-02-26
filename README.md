@@ -50,6 +50,7 @@ Ou via le script Windows:
 
 ```powershell
 python crop_cat.py --padding 0.20
+python crop_cat.py --output-box
 python crop_cat.py --conf 0.40
 python crop_cat.py --model Models/yolo12n.pt
 python crop_cat.py --retry all
@@ -61,6 +62,12 @@ python crop_cat.py --input "D:\MesPhotos\Chats" --output "D:\MesPhotos\Chats\Cro
 `--retry all` vide `Cropped`, remet les images de `Ok` et `Skip` dans `Pictures`, puis relance tout.
 `--retry skip` remet seulement les images de `Skip` dans `Pictures`, puis relance.
 `--retry ok` remet seulement les images de `Ok` dans `Pictures`, puis relance.
+`--output-box` force un recadrage carre qui englobe la box chat detectee (avec padding) si possible; sinon la box est reduite juste assez pour rentrer, en gardant la tete dans le cadre si possible.
+Pour le focus tete via cascade OpenCV, installer en plus:
+
+```powershell
+python -m pip install opencv-python
+```
 
 ## Logs
 

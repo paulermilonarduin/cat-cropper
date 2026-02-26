@@ -2,13 +2,20 @@
 from __future__ import annotations
 
 import argparse
+import math
 import shutil
 import sys
 from pathlib import Path
 from typing import Iterable
 
+import numpy as np
 from PIL import Image, ImageOps
 from ultralytics import YOLO
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 
 CAT_CLASS_ID = 15  # COCO class id for "cat"
@@ -18,6 +25,11 @@ CROPPED_DIR_NAME = "Cropped"
 OK_DIR_NAME = "Ok"
 SKIP_DIR_NAME = "Skip"
 RETRY_CHOICES = ("all", "skip", "ok")
+HEAD_TARGET_RATIO_IN_SQUARE = 0.30
+CAT_FACE_CASCADE_FILES = (
+    "haarcascade_frontalcatface_extended.xml",
+    "haarcascade_frontalcatface.xml",
+)
 IMAGE_EXTENSIONS = {
     ".jpg",
     ".jpeg",
@@ -64,6 +76,14 @@ def parse_args() -> argparse.Namespace:
         help="Padding ratio around the detected cat (default: 0.10).",
     )
     parser.add_argument(
+        "--output-box",
+        action="store_true",
+        help=(
+            "Force square output crop. The square is biased to keep the cat head "
+            "near the upper part of the image."
+        ),
+    )
+    parser.add_argument(
         "--retry",
         choices=RETRY_CHOICES,
         default=None,
@@ -94,6 +114,158 @@ def expand_box(x1: float, y1: float, x2: float, y2: float, pad: float, w: int, h
         min(w, int(round(x2 + dx))),
         min(h, int(round(y2 + dy))),
     )
+
+
+def expand_square_box_with_head_focus(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    pad: float,
+    w: int,
+    h: int,
+    head_point: tuple[float, float] | None = None,
+):
+    ex1, ey1, ex2, ey2 = expand_box(x1, y1, x2, y2, pad, w, h)
+    if head_point is not None:
+        focus_x, focus_y = head_point
+    else:
+        focus_x = (ex1 + ex2) / 2.0
+        focus_y = y1 + ((y2 - y1) * 0.30)
+
+    side_limit = max(1, min(w, h))
+    ex1, ey1, ex2, ey2 = shrink_box_to_square_capacity(
+        ex1, ey1, ex2, ey2, side_limit, focus_x, focus_y
+    )
+
+    bw = max(1, ex2 - ex1)
+    bh = max(1, ey2 - ey1)
+    side = max(1, min(max(bw, bh), side_limit))
+
+    desired_left = int(round(focus_x - (side / 2.0)))
+    desired_top = int(round(focus_y - (side * HEAD_TARGET_RATIO_IN_SQUARE)))
+
+    min_left = max(0, ex2 - side)
+    max_left = min(w - side, ex1)
+    min_top = max(0, ey2 - side)
+    max_top = min(h - side, ey1)
+
+    if min_left <= max_left:
+        left = min(max(desired_left, min_left), max_left)
+    else:
+        left = min(max(desired_left, 0), w - side)
+
+    if min_top <= max_top:
+        top = min(max(desired_top, min_top), max_top)
+    else:
+        top = min(max(desired_top, 0), h - side)
+
+    left = max(0, min(left, w - side))
+    top = max(0, min(top, h - side))
+
+    return (left, top, left + side, top + side)
+
+
+def shrink_box_to_square_capacity(
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    side_limit: int,
+    focus_x: float,
+    focus_y: float,
+):
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+    target_w = min(bw, side_limit)
+    target_h = min(bh, side_limit)
+
+    if target_w == bw and target_h == bh:
+        return x1, y1, x2, y2
+
+    desired_left = int(round(focus_x - (target_w / 2.0)))
+    min_left = x1
+    max_left = x2 - target_w
+
+    keep_focus_left = int(math.ceil(focus_x - target_w))
+    keep_focus_right = int(math.floor(focus_x))
+    focus_left = max(min_left, keep_focus_left)
+    focus_right = min(max_left, keep_focus_right)
+    if focus_left <= focus_right:
+        left = min(max(desired_left, focus_left), focus_right)
+    else:
+        left = min(max(desired_left, min_left), max_left)
+
+    desired_top = int(round(focus_y - (target_h * HEAD_TARGET_RATIO_IN_SQUARE)))
+    min_top = y1
+    max_top = y2 - target_h
+
+    keep_focus_top = int(math.ceil(focus_y - target_h))
+    keep_focus_bottom = int(math.floor(focus_y))
+    focus_top = max(min_top, keep_focus_top)
+    focus_bottom = min(max_top, keep_focus_bottom)
+    if focus_top <= focus_bottom:
+        top = min(max(desired_top, focus_top), focus_bottom)
+    else:
+        top = min(max(desired_top, min_top), max_top)
+
+    return left, top, left + target_w, top + target_h
+
+
+_CAT_FACE_CASCADE = None
+_CAT_FACE_CASCADE_LOADED = False
+
+
+def get_cat_face_cascade():
+    global _CAT_FACE_CASCADE, _CAT_FACE_CASCADE_LOADED
+    if _CAT_FACE_CASCADE_LOADED:
+        return _CAT_FACE_CASCADE
+
+    _CAT_FACE_CASCADE_LOADED = True
+    if cv2 is None:
+        return None
+
+    cascade_root = Path(cv2.data.haarcascades)
+    for filename in CAT_FACE_CASCADE_FILES:
+        cascade_path = cascade_root / filename
+        if not cascade_path.exists():
+            continue
+        cascade = cv2.CascadeClassifier(str(cascade_path))
+        if cascade.empty():
+            continue
+        _CAT_FACE_CASCADE = cascade
+        return _CAT_FACE_CASCADE
+
+    return None
+
+
+def detect_cat_head_point(image: Image.Image, cat_box) -> tuple[float, float] | None:
+    cascade = get_cat_face_cascade()
+    if cascade is None:
+        return None
+
+    x1, y1, x2, y2 = [int(v) for v in cat_box]
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    roi = image.crop((x1, y1, x2, y2)).convert("RGB")
+    if roi.width < 24 or roi.height < 24:
+        return None
+
+    roi_bgr = cv2.cvtColor(np.array(roi), cv2.COLOR_RGB2BGR)
+    roi_gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+
+    faces = cascade.detectMultiScale(
+        roi_gray,
+        scaleFactor=1.05,
+        minNeighbors=4,
+        minSize=(24, 24),
+    )
+    if len(faces) == 0:
+        return None
+
+    fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+    return (x1 + fx + (fw / 2.0), y1 + fy + (fh / 2.0))
 
 
 def save_crop(image: Image.Image, box, out_path: Path) -> None:
@@ -245,6 +417,7 @@ def main() -> int:
     moved_skip = 0
     ok_dir = input_dir / OK_DIR_NAME
     skip_dir = input_dir / SKIP_DIR_NAME
+    warned_head_detection_unavailable = False
 
     for img_path in images:
         try:
@@ -284,7 +457,31 @@ def main() -> int:
         width, height = im.size
 
         _, x1, y1, x2, y2 = max(cat_boxes, key=lambda b: b[0])
-        box = expand_box(x1, y1, x2, y2, args.padding, width, height)
+        if args.output_box:
+            expanded_box = expand_box(x1, y1, x2, y2, args.padding, width, height)
+            head_point = detect_cat_head_point(im, expanded_box)
+            if (
+                head_point is None
+                and cv2 is None
+                and not warned_head_detection_unavailable
+            ):
+                print(
+                    "[warn] Head detection unavailable (opencv-python not installed). "
+                    "Using bbox-based focus."
+                )
+                warned_head_detection_unavailable = True
+            box = expand_square_box_with_head_focus(
+                x1,
+                y1,
+                x2,
+                y2,
+                args.padding,
+                width,
+                height,
+                head_point=head_point,
+            )
+        else:
+            box = expand_box(x1, y1, x2, y2, args.padding, width, height)
         out_path = output_dir / img_path.name
         save_crop(im, box, out_path)
         saved += 1
